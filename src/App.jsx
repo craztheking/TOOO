@@ -1030,7 +1030,7 @@ const MODES = { QUESTIONER:"questioner", VOTE:"vote" };
 
 // ── Online mode config — replace with your Railway URL after deploy ────────────
 const SERVER_URL = (typeof window !== "undefined" && window.GAME_SERVER_URL)
-  || "wss://YOUR-APP.railway.app";   // ← update this after Railway deploy
+  || "wss://tooos-production.up.railway.app";   // ← update this after Railway deploy
 
 const ONLINE_PHASES = {
   HOME:"online_home",            // create or join
