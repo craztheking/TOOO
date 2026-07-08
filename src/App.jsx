@@ -1429,8 +1429,6 @@ export default function App() {
         break;
       default: break;
     }
-  };
-
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [myId]);
   // Keep ref current so WebSocket onmessage always calls latest version
