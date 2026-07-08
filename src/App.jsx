@@ -1030,7 +1030,7 @@ const MODES = { QUESTIONER:"questioner", VOTE:"vote" };
 
 // ── Online mode config — replace with your Railway URL after deploy ────────────
 const SERVER_URL = (typeof window !== "undefined" && window.GAME_SERVER_URL)
-  || "wss://YOUR-APP.railway.app";   // ← update this after Railway deploy
+  || "wss://tooos-production.up.railway.app";
 
 const ONLINE_PHASES = {
   HOME:"online_home",            // create or join
@@ -1167,6 +1167,7 @@ export default function App() {
   const [joinPassword, setJoinPassword] = useState("");
   const [myVoteCast, setMyVoteCast] = useState(false);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
   const [disconnectedPlayers, setDisconnectedPlayers] = useState([]); // [{id,name,color}]
   const [showReconnect, setShowReconnect] = useState(false);
   const [reconnectName, setReconnectName] = useState("");
@@ -1204,26 +1205,60 @@ export default function App() {
   // ── Online WebSocket connection ────────────────────────────────────────────
   const connectAndSend = (msgType, payload) => {
     setOnlineError("");
+
+    // Check if server URL has been configured
+    if (SERVER_URL.includes("YOUR-APP")) {
+      setOnlineError("Server URL not configured — update SERVER_URL in App.jsx with your Railway domain.");
+      return;
+    }
+
+    // Already connected — just send
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: msgType, payload }));
       return;
     }
-    // (re)connect
+
+    // Already connecting — don't open a second socket
+    if (wsRef.current && wsRef.current.readyState === WebSocket.CONNECTING) {
+      return;
+    }
+
+    setIsConnecting(true);
     try {
       const sock = new WebSocket(SERVER_URL);
       wsRef.current = sock;
       setWs(sock);
+
+      // Timeout if connection takes too long
+      const connTimeout = setTimeout(() => {
+        if (sock.readyState !== WebSocket.OPEN) {
+          sock.close();
+          setOnlineError("Connection timed out. Is the server running?");
+          setIsConnecting(false);
+        }
+      }, 8000);
+
       sock.onopen = () => {
+        clearTimeout(connTimeout);
+        setIsConnecting(false);
         sock.send(JSON.stringify({ type: msgType, payload }));
       };
-      sock.onmessage = (e) => { try { handlerRef.current(JSON.parse(e.data)); } catch(err) { console.error('WS parse error', err); } };
-      sock.onerror   = () => setOnlineError("Could not connect to server. Check your connection.");
-      sock.onclose   = () => {
-        // Only show disconnect error if we were mid-game
+      sock.onmessage = (e) => {
+        try { handlerRef.current(JSON.parse(e.data)); }
+        catch(err) { console.error("WS parse error", err); }
+      };
+      sock.onerror = () => {
+        clearTimeout(connTimeout);
+        setIsConnecting(false);
+        setOnlineError("Could not connect to server. Check the SERVER_URL and that your server is running.");
+      };
+      sock.onclose = () => {
+        setIsConnecting(false);
         setWs(null);
       };
     } catch(e) {
-      setOnlineError("WebSocket not supported or server unreachable.");
+      setIsConnecting(false);
+      setOnlineError("WebSocket not supported or server URL is invalid.");
     }
   };
 
@@ -2280,13 +2315,13 @@ export default function App() {
                   </div>
                 </div>
               )}
-              <button style={{...S.bigBtn,opacity:!createName.trim()?0.4:1}} disabled={!createName.trim()}
+              <button style={{...S.bigBtn,opacity:(!createName.trim()||isConnecting)?0.4:1}} disabled={!createName.trim()||isConnecting}
                 onClick={()=>connectAndSend("create_room",{
                   playerName:createName,roomName:createRoomName,
                   password:createPassword,settings:onlineSettings,
                   customQuestions: customQuestions.length > 0 ? customQuestions : [],
                 })}>
-                Create Room →
+                {isConnecting ? "Connecting…" : "Create Room →"}
               </button>
             </div>
           );
@@ -2302,9 +2337,9 @@ export default function App() {
               <input style={{...S.input,marginBottom:12}} placeholder="e.g. XK92PL" value={joinCode} onChange={e=>setJoinCode(e.target.value.toUpperCase())} maxLength={6}/>
               <label style={S.label}>Password (if required)</label>
               <input style={{...S.input,marginBottom:16}} placeholder="Leave blank if none" value={joinPassword} onChange={e=>setJoinPassword(e.target.value)} type="password"/>
-              <button style={{...S.bigBtn,opacity:(!joinName.trim()||joinCode.length<6)?0.4:1}} disabled={!joinName.trim()||joinCode.length<6}
+              <button style={{...S.bigBtn,opacity:(!joinName.trim()||joinCode.length<6||isConnecting)?0.4:1}} disabled={!joinName.trim()||joinCode.length<6||isConnecting}
                 onClick={()=>connectAndSend("join_room",{playerName:joinName,roomCode:joinCode,password:joinPassword})}>
-                Join →
+                {isConnecting ? "Connecting…" : "Join →"}
               </button>
             </div>
           );
