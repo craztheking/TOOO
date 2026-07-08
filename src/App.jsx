@@ -1030,7 +1030,7 @@ const MODES = { QUESTIONER:"questioner", VOTE:"vote" };
 
 // ── Online mode config — replace with your Railway URL after deploy ────────────
 const SERVER_URL = (typeof window !== "undefined" && window.GAME_SERVER_URL)
-  || "wss://tooos-production.up.railway.app";   // ← update this after Railway deploy
+  || "wss://YOUR-APP.railway.app";   // ← update this after Railway deploy
 
 const ONLINE_PHASES = {
   HOME:"online_home",            // create or join
@@ -1140,7 +1140,8 @@ export default function App() {
   const [roomCode, setRoomCode] = useState("");
   const [roomName, setRoomName] = useState("");
   const [onlinePlayers, setOnlinePlayers] = useState([]);
-  const [onlineSettings, setOnlineSettings] = useState({ mode:"questioner", totalRounds:6, discussionTime:90, category:"all" });
+  const [onlineSettings, setOnlineSettings] = useState({ mode:"questioner", totalRounds:6, discussionTime:90, answerTime:60, category:"all", useCustomOnly:false });
+  const [onlineCustomCount, setOnlineCustomCount] = useState(0); // how many custom Qs uploaded to server
   const [myRole, setMyRole] = useState(null);       // "questioner"|"impostor"|"player"
   const [myTopic, setMyTopic] = useState("");
   const [realQuestion, setRealQuestion] = useState("");
@@ -1165,7 +1166,39 @@ export default function App() {
   const [joinCode, setJoinCode] = useState("");
   const [joinPassword, setJoinPassword] = useState("");
   const [myVoteCast, setMyVoteCast] = useState(false);
+  const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
+  const [disconnectedPlayers, setDisconnectedPlayers] = useState([]); // [{id,name,color}]
+  const [showReconnect, setShowReconnect] = useState(false);
+  const [reconnectName, setReconnectName] = useState("");
+  const [reconnectCode, setReconnectCode] = useState("");
+  const [gamePaused, setGamePaused] = useState(false);
+  const [systemMessage, setSystemMessage] = useState(""); // e.g. "Alex rejoined"
+  const [chatInput, setChatInput] = useState("");
+  const [chatMessages, setChatMessages] = useState([]);
+  const [readyTimerSec, setReadyTimerSec] = useState(0);
+  const [answerTimerSec, setAnswerTimerSec] = useState(0);
+  const [answerTimerTotal, setAnswerTimerTotal] = useState(60);
+  const [voteTimerSec, setVoteTimerSec] = useState(0);
+  const [accuseTimerSec, setAccuseTimerSec] = useState(0);
+  const chatEndRef = useRef(null);
   const wsRef = useRef(null);
+
+  // ── Back button intercept ─────────────────────────────────────────────────
+  useEffect(() => {
+    if (phase !== "online") return;
+    const onBack = (e) => {
+      e.preventDefault();
+      if (onlinePhase === ONLINE_PHASES.HOME || onlinePhase === ONLINE_PHASES.CREATING ||
+          onlinePhase === ONLINE_PHASES.JOINING || onlinePhase === ONLINE_PHASES.BROWSE) {
+        setPhase(PHASES.MAIN_MENU);
+      } else {
+        setShowLeaveConfirm(true);
+      }
+    };
+    window.history.pushState(null, "", window.location.href);
+    window.addEventListener("popstate", onBack);
+    return () => window.removeEventListener("popstate", onBack);
+  }, [phase, onlinePhase]);
 
   // ── Online WebSocket connection ────────────────────────────────────────────
   const connectAndSend = (msgType, payload) => {
@@ -1199,13 +1232,23 @@ export default function App() {
     }
   };
 
-  const handleServerMessage = (msg) => {
+  const handleServerMessage = useCallback((msg) => {
     const { type, payload } = msg;
     switch(type) {
       case "rooms_list":
         setPublicRooms(payload.rooms || []);
         break;
       case "room_created":
+        setMyId(payload.playerId);
+        setRoomCode(payload.code);
+        setRoomName(payload.roomName);
+        setIsHost(payload.isHost);
+        setOnlinePlayers(payload.players || []);
+        setOnlineSettings(payload.settings || onlineSettings);
+        setOnlineTotalRounds(payload.settings?.totalRounds || 6);
+        setOnlineCustomCount(payload.customQuestionCount || 0);
+        setOnlinePhase(ONLINE_PHASES.WAITING);
+        break;
       case "room_joined":
         setMyId(payload.playerId);
         setRoomCode(payload.code);
@@ -1218,12 +1261,19 @@ export default function App() {
         break;
       case "player_joined":
       case "player_left":
-      case "player_disconnected":
         setOnlinePlayers(payload.players || []);
         break;
       case "settings_updated":
         setOnlineSettings(payload.settings);
         setOnlineTotalRounds(payload.settings.totalRounds);
+        break;
+      case "custom_questions_updated":
+        setOnlineCustomCount(payload.count || 0);
+        setSystemMessage(`✏️ ${payload.hostName} uploaded ${payload.count} custom question${payload.count!==1?"s":""}`);
+        setTimeout(()=>setSystemMessage(""), 4000);
+        break;
+      case "custom_questions_saved":
+        setOnlineCustomCount(payload.count || 0);
         break;
       case "round_start":
         setMyRole(payload.role);
@@ -1237,12 +1287,38 @@ export default function App() {
         setMyVoteCast(false);
         setAnsweredIds([]);
         setReadyCount(0);
+        setChatMessages([]);
+        setChatInput("");
+        setReadyTimerSec(payload.readyTime || 30);
+        setAnswerTimerSec(0);
+        setVoteTimerSec(0);
+        setAccuseTimerSec(0);
         setOnlinePhase(ONLINE_PHASES.ROLE_REVEAL);
         break;
       case "ready_progress":
         setReadyCount(payload.readyCount);
         break;
+      case "ready_tick":
+        setReadyTimerSec(payload.seconds);
+        break;
+      case "answer_tick":
+        setAnswerTimerSec(payload.seconds);
+        if (payload.seconds <= 10) { SFX.tickUrgent(); HX.tap(); }
+        break;
+      case "vote_tick":
+        setVoteTimerSec(payload.seconds);
+        if (payload.seconds <= 10) { SFX.tickUrgent(); HX.tap(); }
+        break;
+      case "accuse_tick":
+        setAccuseTimerSec(payload.seconds);
+        if (payload.seconds <= 10) { SFX.tickUrgent(); HX.tap(); }
+        break;
+      case "chat_message":
+        setChatMessages(prev => [...prev, payload]);
+        setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior:"smooth" }), 50);
+        break;
       case "answering_start":
+        setAnswerTimerSec(onlineSettings.answerTime || 60);
         setOnlinePhase(ONLINE_PHASES.ANSWERING);
         break;
       case "answer_progress":
@@ -1284,6 +1360,63 @@ export default function App() {
       case "host_changed":
         setIsHost(payload.newHostId === myId);
         setOnlinePlayers(payload.players || []);
+        setSystemMessage(`👑 ${payload.newHostName || "Someone"} is now the host`);
+        setTimeout(() => setSystemMessage(""), 4000);
+        break;
+      case "player_disconnected":
+        setOnlinePlayers(payload.players || []);
+        setDisconnectedPlayers(prev => [...prev.filter(p=>p.id!==payload.playerId), {id:payload.playerId, name:payload.playerName, color:"#666"}]);
+        setSystemMessage(`⚠️ ${payload.playerName} disconnected`);
+        setTimeout(() => setSystemMessage(""), 5000);
+        break;
+      case "player_reconnected":
+        setOnlinePlayers(payload.players || []);
+        setDisconnectedPlayers(prev => prev.filter(p=>p.id!==payload.playerId));
+        setSystemMessage(`✅ ${payload.playerName} reconnected`);
+        setTimeout(() => setSystemMessage(""), 4000);
+        break;
+      case "player_disconnect_warning":
+        setSystemMessage(`⏳ ${payload.playerName} has 60s to reconnect or will be dropped`);
+        setTimeout(() => setSystemMessage(""), 8000);
+        break;
+      case "player_kicked":
+        setOnlinePlayers(payload.players || []);
+        setDisconnectedPlayers(prev => prev.filter(p=>p.id!==payload.playerId));
+        setSystemMessage(payload.reason === "timeout"
+          ? `🚫 ${payload.playerName} was removed (timed out)`
+          : `🚫 ${payload.playerName} was dropped by the host`);
+        setTimeout(() => setSystemMessage(""), 5000);
+        break;
+      case "game_paused":
+        setGamePaused(true);
+        setSystemMessage(`⏸ Game paused: ${payload.reason}`);
+        break;
+      case "reconnected":
+        setMyId(payload.playerId);
+        setRoomCode(payload.roomName || "");
+        setIsHost(payload.isHost);
+        setOnlinePlayers(payload.players || []);
+        setOnlineSettings(payload.settings || onlineSettings);
+        setOnlineRound(payload.round || 0);
+        setOnlineTotalRounds(payload.totalRounds || 6);
+        if (payload.chatMessages) setChatMessages(payload.chatMessages);
+        setGamePaused(false);
+        setShowReconnect(false);
+        // Navigate to correct screen based on server phase
+        const phaseMap = {
+          lobby: ONLINE_PHASES.WAITING,
+          role_reveal: ONLINE_PHASES.ROLE_REVEAL,
+          answering: ONLINE_PHASES.ANSWERING,
+          discussion: ONLINE_PHASES.DISCUSSION,
+          accuse: ONLINE_PHASES.ACCUSE,
+          voting: ONLINE_PHASES.VOTING,
+          reveal: ONLINE_PHASES.REVEAL,
+          scoreboard: ONLINE_PHASES.SCOREBOARD,
+        };
+        setOnlinePhase(phaseMap[payload.phase] || ONLINE_PHASES.WAITING);
+        if (payload.roundData?.answers) setOnlineAnswers(payload.roundData.answers);
+        if (payload.roundData?.realQuestion) setRealQuestion(payload.roundData.realQuestion);
+        SFX.received();
         break;
       case "kicked":
         wsRef.current?.close();
@@ -1297,7 +1430,14 @@ export default function App() {
     }
   };
 
-  const leaveOnline = () => {
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [myId]);
+
+  const leaveOnline = (force=false) => {
+    if (!force && onlinePhase !== ONLINE_PHASES.WAITING && onlinePhase !== ONLINE_PHASES.HOME) {
+      setShowLeaveConfirm(true);
+      return;
+    }
     wsRef.current?.close();
     wsRef.current = null;
     setWs(null);
@@ -1306,6 +1446,12 @@ export default function App() {
     setMyId(null);
     setIsHost(false);
     setRoomCode("");
+    setChatMessages([]);
+    setChatInput("");
+    setShowLeaveConfirm(false);
+    setDisconnectedPlayers([]);
+    setGamePaused(false);
+    setSystemMessage("");
   };
 
   // ── Custom questions
@@ -1979,6 +2125,64 @@ export default function App() {
         )}
 
       {/* ── ONLINE MODE ── */}
+        {/* Leave confirmation overlay */}
+        {showLeaveConfirm && (
+          <div style={{position:"fixed",inset:0,background:"#000000cc",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+            <div style={{...S.card,maxWidth:340,width:"100%"}}>
+              <h2 style={{...S.cardTitle,marginBottom:8}}>Leave the game?</h2>
+              <p style={{...S.hint,marginBottom:16}}>You will be disconnected. You can rejoin within 2 minutes using your name and room code.</p>
+              <div style={{display:"flex",gap:8}}>
+                <button style={{...S.bigBtn,flex:1,background:"#E05C5C"}} onClick={()=>leaveOnline(true)}>Leave</button>
+                <button style={{...S.bigBtn,flex:1,background:"#2a2a3a"}} onClick={()=>setShowLeaveConfirm(false)}>Stay</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* System message toast */}
+        {systemMessage && (
+          <div style={{position:"fixed",top:70,left:"50%",transform:"translateX(-50%)",background:"#1e1e2e",border:"1px solid #3a3a5a",borderRadius:10,padding:"8px 16px",fontSize:13,color:"#e0e0e0",zIndex:999,maxWidth:320,textAlign:"center",boxShadow:"0 4px 20px #000a"}}>
+            {systemMessage}
+          </div>
+        )}
+
+        {/* Reconnect screen */}
+        {showReconnect && (
+          <div style={{position:"fixed",inset:0,background:"#000000cc",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+            <div style={{...S.card,maxWidth:340,width:"100%"}}>
+              <h2 style={{...S.cardTitle,marginBottom:8}}>🔄 Reconnect</h2>
+              <p style={S.hint}>Enter your name and room code to rejoin.</p>
+              {onlineError && <p style={{color:"#E05C5C",fontSize:13,marginBottom:8}}>⚠️ {onlineError}</p>}
+              <label style={S.label}>Your name</label>
+              <input style={{...S.input,marginBottom:10}} value={reconnectName} onChange={e=>setReconnectName(e.target.value)} placeholder="Your exact name…"/>
+              <label style={S.label}>Room code</label>
+              <input style={{...S.input,marginBottom:14}} value={reconnectCode} onChange={e=>setReconnectCode(e.target.value.toUpperCase())} placeholder="6-letter code…" maxLength={6}/>
+              <div style={{display:"flex",gap:8}}>
+                <button style={{...S.bigBtn,flex:1,opacity:(!reconnectName.trim()||reconnectCode.length<6)?0.4:1}}
+                  disabled={!reconnectName.trim()||reconnectCode.length<6}
+                  onClick={()=>{
+                    setOnlineError("");
+                    connectAndSend("reconnect",{playerName:reconnectName,roomCode:reconnectCode});
+                  }}>Rejoin →</button>
+                <button style={{...S.bigBtn,flex:1,background:"#2a2a3a"}} onClick={()=>{setShowReconnect(false);setOnlineError("");}}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Game paused overlay */}
+        {gamePaused && onlinePhase!==ONLINE_PHASES.WAITING && (
+          <div style={{position:"fixed",inset:0,background:"#000000aa",zIndex:998,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+            <div style={{...S.card,maxWidth:340,width:"100%",textAlign:"center"}}>
+              <div style={{fontSize:48,marginBottom:12}}>⏸</div>
+              <h2 style={S.cardTitle}>Game Paused</h2>
+              <p style={S.hint}>Not enough players to continue. Waiting for players to reconnect or be dropped.</p>
+              {isHost && <button style={{...S.bigBtn,marginTop:8,background:"#2a2a3a"}} onClick={()=>setGamePaused(false)}>Dismiss</button>}
+            </div>
+          </div>
+        )}
+
+        {/* ── ONLINE MODE ── */}
         {phase==="online" && (()=>{
           const me = onlinePlayers.find(p=>p.id===myId);
           const isVote = onlineSettings.mode === MODES.VOTE;
@@ -1991,7 +2195,8 @@ export default function App() {
               <p style={S.hint}>Create a private room or join a friend's room by code. Everyone plays on their own phone.</p>
               <button style={{...S.bigBtn,marginBottom:8}} onClick={()=>setOnlinePhase(ONLINE_PHASES.CREATING)}>➕ Create Room</button>
               <button style={{...S.bigBtn,background:"#2a2a3a",border:"1px solid #3a3a5a",marginBottom:8}} onClick={()=>setOnlinePhase(ONLINE_PHASES.JOINING)}>🔑 Join by Code</button>
-              <button style={{...S.bigBtn,background:"#2a2a3a",border:"1px solid #3a3a5a"}} onClick={()=>{connectAndSend("list_rooms",{});setOnlinePhase(ONLINE_PHASES.BROWSE);}}>🌍 Browse Public Rooms</button>
+              <button style={{...S.bigBtn,background:"#2a2a3a",border:"1px solid #3a3a5a",marginBottom:8}} onClick={()=>{connectAndSend("list_rooms",{});setOnlinePhase(ONLINE_PHASES.BROWSE);}}>🌍 Browse Public Rooms</button>
+              <button style={{...S.bigBtn,background:"#1a1a2e",border:"1px dashed #3a3a5a"}} onClick={()=>{setReconnectName(""); setReconnectCode(""); setShowReconnect(true);}}>🔄 Rejoin a Game</button>
             </div>
           );
 
@@ -2030,14 +2235,56 @@ export default function App() {
                 <input type="range" min={6} max={30} value={onlineSettings.totalRounds} style={S.slider} onChange={e=>setOnlineSettings(s=>({...s,totalRounds:+e.target.value}))}/>
                 <span style={S.sliderEnd}>30</span>
               </div>
+              <label style={S.label}>Answer Time (per player)</label>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
+                {[{l:"30s",v:30},{l:"45s",v:45},{l:"1m",v:60},{l:"90s",v:90},{l:"2m",v:120}].map(o=>(
+                  <button key={o.v} style={{...S.timerChip,...(onlineSettings.answerTime===o.v?S.timerChipActive:{})}} onClick={()=>setOnlineSettings(s=>({...s,answerTime:o.v}))}>{o.l}</button>
+                ))}
+              </div>
               <label style={S.label}>Discussion Timer</label>
               <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:16}}>
                 {[{l:"30s",v:30},{l:"1m",v:60},{l:"90s",v:90},{l:"2m",v:120},{l:"3m",v:180}].map(o=>(
                   <button key={o.v} style={{...S.timerChip,...(onlineSettings.discussionTime===o.v?S.timerChipActive:{})}} onClick={()=>setOnlineSettings(s=>({...s,discussionTime:o.v}))}>{o.l}</button>
                 ))}
               </div>
+              {/* Custom questions */}
+              <hr style={S.divider}/>
+              <h3 style={S.settingsTitle}>✏️ Custom Questions</h3>
+              {customQuestions.length === 0 ? (
+                <p style={{fontSize:13,color:"#555",marginBottom:10}}>
+                  No custom questions saved locally.{" "}
+                  <span style={{color:"#5C9FE0",cursor:"pointer"}} onClick={()=>{setPhase(PHASES.QUESTION_EDITOR);}}>Add some in Custom Questions →</span>
+                </p>
+              ) : (
+                <div style={{marginBottom:12}}>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+                    <span style={{fontSize:13,color:"#888"}}>{customQuestions.length} question{customQuestions.length!==1?"s":""} saved locally</span>
+                    <button style={{...S.btn,fontSize:12,padding:"5px 12px",background:"#2a2a3a"}}
+                      onClick={()=>{
+                        connectAndSend("create_room",{
+                          playerName:createName,roomName:createRoomName,
+                          password:createPassword,settings:onlineSettings,
+                          customQuestions,
+                        });
+                      }}
+                      disabled={!createName.trim()}>
+                      Upload with room
+                    </button>
+                  </div>
+                  <div style={S.toggleRow} onClick={()=>setOnlineSettings(s=>({...s,useCustomOnly:!s.useCustomOnly}))}>
+                    <div style={{width:38,height:22,borderRadius:11,background:onlineSettings.useCustomOnly?"#5C9FE0":"#2a2a3a",position:"relative",transition:"background 0.2s",flexShrink:0}}>
+                      <div style={{position:"absolute",top:3,left:onlineSettings.useCustomOnly?18:2,width:16,height:16,borderRadius:"50%",background:"#fff",transition:"left 0.2s"}}/>
+                    </div>
+                    <span style={{fontSize:14,color:"#ccc"}}>Use custom questions only</span>
+                  </div>
+                </div>
+              )}
               <button style={{...S.bigBtn,opacity:!createName.trim()?0.4:1}} disabled={!createName.trim()}
-                onClick={()=>connectAndSend("create_room",{playerName:createName,roomName:createRoomName,password:createPassword,settings:onlineSettings})}>
+                onClick={()=>connectAndSend("create_room",{
+                  playerName:createName,roomName:createRoomName,
+                  password:createPassword,settings:onlineSettings,
+                  customQuestions: customQuestions.length > 0 ? customQuestions : [],
+                })}>
                 Create Room →
               </button>
             </div>
@@ -2109,8 +2356,35 @@ export default function App() {
                 </span>
               </div>
               {onlinePlayers.length<3 && <p style={S.warn}>Need at least 3 players to start.</p>}
+              {/* Custom questions status */}
+              {onlineCustomCount > 0 && (
+                <div style={{...S.questionReminder,marginBottom:8,borderColor:"#A05CE0"}}>
+                  <span style={{...S.questionReminderLabel,color:"#A05CE0"}}>✏️ Custom Questions</span>
+                  <span style={{...S.questionReminderText,fontStyle:"normal",fontSize:13}}>{onlineCustomCount} question{onlineCustomCount!==1?"s":""} loaded for this room</span>
+                </div>
+              )}
+              {isHost && customQuestions.length > 0 && (
+                <button style={{...S.bigBtn,background:"#2a2a3a",border:"1px solid #A05CE044",marginBottom:8,fontSize:13}}
+                  onClick={()=>sendToServer("update_custom_questions",{questions:customQuestions})}>
+                  ✏️ Upload My Custom Questions ({customQuestions.length})
+                </button>
+              )}
+              {/* Disconnected players — host can drop them */}
+              {disconnectedPlayers.length > 0 && (
+                <div style={{marginBottom:12}}>
+                  <p style={{fontSize:12,color:"#E0C15C",marginBottom:6}}>⚠️ Disconnected players:</p>
+                  {disconnectedPlayers.map(p=>(
+                    <div key={p.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 0",borderBottom:"1px solid #1e1e2e"}}>
+                      <span style={{...S.dot,background:"#555"}}/>
+                      <span style={{color:"#888",flex:1}}>{p.name} (disconnected)</span>
+                      {isHost && <button style={{...S.btn,fontSize:12,padding:"4px 10px",background:"#3a1a1a",color:"#E05C5C"}}
+                        onClick={()=>sendToServer("drop_player",{playerId:p.id})}>Drop</button>}
+                    </div>
+                  ))}
+                </div>
+              )}
               {isHost ? (
-                <button style={{...S.bigBtn,opacity:onlinePlayers.length<3?0.4:1}} disabled={onlinePlayers.length<3}
+                <button style={{...S.bigBtn,opacity:onlinePlayers.filter(p=>p.connected).length<3?0.4:1}} disabled={onlinePlayers.filter(p=>p.connected).length<3}
                   onClick={()=>sendToServer("start_game")}>
                   Start Game →
                 </button>
@@ -2146,9 +2420,10 @@ export default function App() {
                   </>
                 )}
               </div>
-              <p style={{fontSize:12,color:"#555",textAlign:"center",marginBottom:10}}>
-                {readyCount} / {onlinePlayers.length} ready
-              </p>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,fontSize:13}}>
+                <span style={{color:"#666"}}>{readyCount} / {onlinePlayers.length} ready</span>
+                <span style={{color:readyTimerSec<=10?"#E05C5C":"#aaa",fontWeight:700}}>⏱ {readyTimerSec}s</span>
+              </div>
               <button style={{...S.bigBtn,background:"#E0C15C",color:"#1a1a00"}}
                 onClick={()=>{ SFX.confirm(); sendToServer("player_ready"); }}>
                 Got it — I'm Ready ✓
@@ -2177,6 +2452,9 @@ export default function App() {
                     onChange={e=>setMyAnswer(e.target.value)}
                     onKeyDown={e=>{ if(e.key==="Enter"&&myAnswer.trim()){ SFX.submit(); sendToServer("submit_answer",{answer:myAnswer}); setOnlinePhase("online_answering_sent"); }}}
                     autoFocus/>
+                  <div style={{textAlign:"right",fontSize:12,color:answerTimerSec<=10?"#E05C5C":"#666",marginBottom:6,fontWeight:answerTimerSec<=10?700:400}}>
+                    ⏱ {answerTimerSec}s remaining
+                  </div>
                   <button style={{...S.bigBtn,background:"#E0C15C",color:"#1a1a00",opacity:!myAnswer.trim()?0.4:1}}
                     disabled={!myAnswer.trim()}
                     onClick={()=>{ SFX.submit(); sendToServer("submit_answer",{answer:myAnswer}); setOnlinePhase("online_answering_sent"); }}>
@@ -2228,6 +2506,31 @@ export default function App() {
                   <button style={{...S.bigBtn,flex:1,background:"#2a2a3a",border:"1px solid #3a3a5a",padding:"14px 8px"}} onClick={()=>TTS.stop()}>⏹</button>
                 </div>
               )}
+              {/* Chat */}
+              <div style={{background:"#1a1a28",borderRadius:12,padding:10,maxHeight:160,overflowY:"auto",marginBottom:8,border:"1px solid #2a2a3a"}}>
+                {chatMessages.length===0 && <p style={{color:"#444",fontSize:12,textAlign:"center",padding:"8px 0"}}>Chat with your group…</p>}
+                {chatMessages.map((m,i)=>(
+                  <div key={i} style={{marginBottom:6,fontSize:13}}>
+                    <span style={{fontWeight:700,color:m.color}}>{m.playerName}: </span>
+                    <span style={{color:"#ccc"}}>{m.text}</span>
+                  </div>
+                ))}
+                <div ref={chatEndRef}/>
+              </div>
+              <div style={{display:"flex",gap:6,marginBottom:8}}>
+                <input style={{...S.input,flex:1,padding:"8px 12px",fontSize:14}} placeholder="Say something…" value={chatInput}
+                  onChange={e=>setChatInput(e.target.value)}
+                  onKeyDown={e=>{ if(e.key==="Enter"&&chatInput.trim()){
+                    const now=Date.now();
+                    if(!window._lastChat||now-window._lastChat>800){ window._lastChat=now; sendToServer("chat_message",{text:chatInput}); setChatInput(""); }
+                  }}}/>
+                <button style={{...S.btn,padding:"8px 14px"}} onClick={()=>{
+                  if(chatInput.trim()){
+                    const now=Date.now();
+                    if(!window._lastChat||now-window._lastChat>800){ window._lastChat=now; sendToServer("chat_message",{text:chatInput}); setChatInput(""); }
+                  }
+                }}>Send</button>
+              </div>
               <p style={{fontSize:12,color:"#666",textAlign:"center"}}>Talk it out — timer ends automatically</p>
             </div>
           );
@@ -2249,6 +2552,9 @@ export default function App() {
                         {onlineVoteTarget===p.id&&<span style={{marginLeft:"auto",color:p.color}}>◀</span>}
                       </div>
                     ))}
+                    <div style={{textAlign:"center",fontSize:13,color:accuseTimerSec<=10?"#E05C5C":"#666",fontWeight:accuseTimerSec<=10?700:400,marginBottom:6}}>
+                      ⏱ {accuseTimerSec}s to decide
+                    </div>
                     <button style={{...S.bigBtn,background:"#E05C5C",opacity:!onlineVoteTarget?0.4:1,marginTop:8}} disabled={!onlineVoteTarget}
                       onClick={()=>{ SFX.confirm(); sendToServer("accuse",{accusedId:onlineVoteTarget}); }}>
                       Accuse {onlinePlayers.find(p=>p.id===onlineVoteTarget)?.name||"…"}
@@ -2274,6 +2580,7 @@ export default function App() {
                   <div style={{fontSize:56}}>✅</div>
                   <h2 style={S.handoffTitle}>Vote cast!</h2>
                   <p style={S.handoffHint}>Waiting for others… {votedCount}/{onlinePlayers.length} voted</p>
+                  <p style={{fontSize:13,color:voteTimerSec<=10?"#E05C5C":"#666",fontWeight:voteTimerSec<=10?700:400}}>⏱ {voteTimerSec}s</p>
                 </div>
               ) : (
                 <>
