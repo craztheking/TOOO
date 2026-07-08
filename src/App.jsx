@@ -1168,6 +1168,10 @@ export default function App() {
   const [myVoteCast, setMyVoteCast] = useState(false);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [savedRoom, setSavedRoom] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("tooo_last_room") || "null"); }
+    catch(e) { return null; }
+  });
   const [disconnectedPlayers, setDisconnectedPlayers] = useState([]); // [{id,name,color}]
   const [showReconnect, setShowReconnect] = useState(false);
   const [reconnectName, setReconnectName] = useState("");
@@ -1284,6 +1288,8 @@ export default function App() {
         setOnlineTotalRounds(payload.settings?.totalRounds || 6);
         setOnlineCustomCount(payload.customQuestionCount || 0);
         setOnlinePhase(ONLINE_PHASES.WAITING);
+        // Save for quick rejoin
+        try { localStorage.setItem("tooo_last_room", JSON.stringify({ code:payload.code, name:createName.trim() })); } catch(e) {}
         break;
       case "room_joined":
         setMyId(payload.playerId);
@@ -1294,6 +1300,8 @@ export default function App() {
         setOnlineSettings(payload.settings || onlineSettings);
         setOnlineTotalRounds(payload.settings?.totalRounds || 6);
         setOnlinePhase(ONLINE_PHASES.WAITING);
+        // Save for quick rejoin
+        try { localStorage.setItem("tooo_last_room", JSON.stringify({ code:payload.code, name:joinName.trim() })); } catch(e) {}
         break;
       case "player_joined":
       case "player_left":
@@ -1488,6 +1496,8 @@ export default function App() {
     setDisconnectedPlayers([]);
     setGamePaused(false);
     setSystemMessage("");
+    // Only clear saved room if we deliberately left (not crash)
+    if (force) { try { localStorage.removeItem("tooo_last_room"); } catch(e) {} setSavedRoom(null); }
   };
 
   // ── Custom questions
@@ -1691,6 +1701,13 @@ export default function App() {
           <span style={S.logo}>🕵️ The Odd One Out</span>
         </div>
         {round>0 && phase!==PHASES.MAIN_MENU && <span style={S.roundBadge}>Round {round} / {totalRounds}</span>}
+        {phase==="online" && roomCode && onlinePhase!==ONLINE_PHASES.HOME && onlinePhase!==ONLINE_PHASES.CREATING && onlinePhase!==ONLINE_PHASES.JOINING && onlinePhase!==ONLINE_PHASES.BROWSE && (
+          <div style={{display:"flex",alignItems:"center",gap:6,background:"#1a1a2e",border:"1px solid #3a3a5a",borderRadius:20,padding:"4px 12px",cursor:"pointer"}}
+            onClick={()=>{ try{navigator.clipboard.writeText(roomCode);}catch(e){} setSystemMessage("📋 Room code copied!"); setTimeout(()=>setSystemMessage(""),2000); }}>
+            <span style={{fontSize:11,color:"#555",textTransform:"uppercase",letterSpacing:1}}>Room</span>
+            <span style={{fontSize:14,fontWeight:700,color:"#5C9FE0",letterSpacing:2}}>{roomCode}</span>
+          </div>
+        )}
       </header>
 
       <main style={S.main}>
@@ -2233,6 +2250,30 @@ export default function App() {
               <button style={{...S.bigBtn,background:"#2a2a3a",border:"1px solid #3a3a5a",marginBottom:8}} onClick={()=>setOnlinePhase(ONLINE_PHASES.JOINING)}>🔑 Join by Code</button>
               <button style={{...S.bigBtn,background:"#2a2a3a",border:"1px solid #3a3a5a",marginBottom:8}} onClick={()=>{connectAndSend("list_rooms",{});setOnlinePhase(ONLINE_PHASES.BROWSE);}}>🌍 Browse Public Rooms</button>
               <button style={{...S.bigBtn,background:"#1a1a2e",border:"1px dashed #3a3a5a"}} onClick={()=>{setReconnectName(""); setReconnectCode(""); setShowReconnect(true);}}>🔄 Rejoin a Game</button>
+              {savedRoom && (
+                <div style={{marginTop:12,background:"#1a1a2e",border:"1px solid #5C9FE044",borderRadius:14,padding:14}}>
+                  <div style={{fontSize:12,color:"#5C9FE0",textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Last room</div>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+                    <div>
+                      <div style={{fontWeight:700,color:"#e0e0e0",fontSize:16,letterSpacing:2}}>{savedRoom.code}</div>
+                      <div style={{fontSize:12,color:"#666",marginTop:2}}>as {savedRoom.name}</div>
+                    </div>
+                    <button style={{...S.btn,fontSize:12,padding:"6px 14px"}}
+                      onClick={()=>{
+                        setReconnectName(savedRoom.name);
+                        setReconnectCode(savedRoom.code);
+                        setOnlineError("");
+                        connectAndSend("reconnect",{playerName:savedRoom.name,roomCode:savedRoom.code});
+                      }}>
+                      Rejoin →
+                    </button>
+                  </div>
+                  <button style={{fontSize:11,color:"#444",background:"none",border:"none",cursor:"pointer",padding:0}}
+                    onClick={()=>{ try{localStorage.removeItem("tooo_last_room");}catch(e){} setSavedRoom(null); }}>
+                    Clear saved room
+                  </button>
+                </div>
+              )}
             </div>
           );
 
