@@ -1182,6 +1182,7 @@ export default function App() {
   const [accuseTimerSec, setAccuseTimerSec] = useState(0);
   const chatEndRef = useRef(null);
   const wsRef = useRef(null);
+  const handlerRef = useRef(null); // always points to latest handleServerMessage
 
   // ── Back button intercept ─────────────────────────────────────────────────
   useEffect(() => {
@@ -1215,7 +1216,7 @@ export default function App() {
       sock.onopen = () => {
         sock.send(JSON.stringify({ type: msgType, payload }));
       };
-      sock.onmessage = (e) => handleServerMessage(JSON.parse(e.data));
+      sock.onmessage = (e) => { try { handlerRef.current(JSON.parse(e.data)); } catch(err) { console.error('WS parse error', err); } };
       sock.onerror   = () => setOnlineError("Could not connect to server. Check your connection.");
       sock.onclose   = () => {
         // Only show disconnect error if we were mid-game
@@ -1432,6 +1433,8 @@ export default function App() {
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [myId]);
+  // Keep ref current so WebSocket onmessage always calls latest version
+  useEffect(() => { handlerRef.current = handleServerMessage; });
 
   const leaveOnline = (force=false) => {
     if (!force && onlinePhase !== ONLINE_PHASES.WAITING && onlinePhase !== ONLINE_PHASES.HOME) {
@@ -2477,61 +2480,97 @@ export default function App() {
 
           // ── DISCUSSION ────────────────────────────────────────────────────
           if (onlinePhase===ONLINE_PHASES.DISCUSSION) return (
-            <div style={S.card}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                <h2 style={{...S.cardTitle,margin:0}}>🗣️ Discuss!</h2>
-                {isHost && (
-                  <button style={{...S.btn,padding:"6px 12px",fontSize:12,background:"#E05C5C"}} onClick={()=>sendToServer("stop_timer")}>
-                    Skip Timer
-                  </button>
-                )}
+            <div style={{...S.card,display:"flex",flexDirection:"column",height:"calc(100vh - 80px)",overflow:"hidden",padding:14}}>
+
+              {/* Fixed header — timer + controls */}
+              <div style={{flexShrink:0}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                  <h2 style={{...S.cardTitle,margin:0,fontSize:17}}>🗣️ Discuss!</h2>
+                  <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                    <span style={{fontSize:13,fontWeight:700,color:onlineTimerSec<=10?"#E05C5C":"#aaa"}}>⏱ {onlineTimerSec}s</span>
+                    {isHost && (
+                      <button style={{...S.btn,padding:"5px 10px",fontSize:11,background:"#E05C5C"}} onClick={()=>sendToServer("stop_timer")}>
+                        Skip
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div style={S.questionReminder}>
+                  <span style={S.questionReminderLabel}>❓ The question was</span>
+                  <span style={{...S.questionReminderText,fontSize:13}}>"{realQuestion}"</span>
+                </div>
               </div>
-              <TimerRing seconds={onlineTimerSec} total={onlineTimerTotal}/>
-              <div style={S.questionReminder}>
-                <span style={S.questionReminderLabel}>❓ The question was</span>
-                <span style={S.questionReminderText}>"{realQuestion}"</span>
-              </div>
-              <div style={S.answersGrid}>
+
+              {/* Scrollable middle — answers */}
+              <div style={{flex:"0 0 auto",maxHeight:180,overflowY:"auto",margin:"8px 0"}}>
                 {Object.entries(onlineAnswers).map(([pid,ans])=>{
                   const p=onlinePlayers.find(x=>x.id===pid);
                   if(!p) return null;
-                  return (<div key={pid} style={S.answerCard}><div style={{...S.answerName,color:p.color}}>{p.name}</div><div style={S.answerText}>"{ans}"</div></div>);
+                  return (
+                    <div key={pid} style={{...S.answerCard,marginBottom:6,padding:"8px 12px"}}>
+                      <span style={{...S.answerName,color:p.color,display:"inline"}}>{p.name}: </span>
+                      <span style={{...S.answerText,fontStyle:"italic",color:"#ccc"}}>"{ans}"</span>
+                    </div>
+                  );
                 })}
               </div>
-              {ttsEnabled && (
-                <div style={{display:"flex",gap:8,marginBottom:8}}>
-                  <button style={{...S.bigBtn,flex:3,background:"#2a2a3a",border:"1px solid #3a3a5a"}}
-                    onClick={()=>TTS.readAnswers(onlineAnswers, onlinePlayers.reduce((acc,p)=>{acc[p.id]=p;return acc;},{})
-                    )}>🔈 Read Aloud</button>
-                  <button style={{...S.bigBtn,flex:1,background:"#2a2a3a",border:"1px solid #3a3a5a",padding:"14px 8px"}} onClick={()=>TTS.stop()}>⏹</button>
-                </div>
-              )}
-              {/* Chat */}
-              <div style={{background:"#1a1a28",borderRadius:12,padding:10,maxHeight:160,overflowY:"auto",marginBottom:8,border:"1px solid #2a2a3a"}}>
-                {chatMessages.length===0 && <p style={{color:"#444",fontSize:12,textAlign:"center",padding:"8px 0"}}>Chat with your group…</p>}
+
+              {/* Chat — fills remaining space */}
+              <div style={{flex:1,minHeight:0,background:"#1a1a28",borderRadius:10,padding:10,overflowY:"auto",marginBottom:8,border:"1px solid #2a2a3a"}}>
+                {chatMessages.length===0 && <p style={{color:"#444",fontSize:12,textAlign:"center",paddingTop:8}}>No messages yet — say something!</p>}
                 {chatMessages.map((m,i)=>(
-                  <div key={i} style={{marginBottom:6,fontSize:13}}>
+                  <div key={i} style={{marginBottom:6,fontSize:13,lineHeight:1.4}}>
                     <span style={{fontWeight:700,color:m.color}}>{m.playerName}: </span>
                     <span style={{color:"#ccc"}}>{m.text}</span>
                   </div>
                 ))}
                 <div ref={chatEndRef}/>
               </div>
-              <div style={{display:"flex",gap:6,marginBottom:8}}>
-                <input style={{...S.input,flex:1,padding:"8px 12px",fontSize:14}} placeholder="Say something…" value={chatInput}
-                  onChange={e=>setChatInput(e.target.value)}
-                  onKeyDown={e=>{ if(e.key==="Enter"&&chatInput.trim()){
-                    const now=Date.now();
-                    if(!window._lastChat||now-window._lastChat>800){ window._lastChat=now; sendToServer("chat_message",{text:chatInput}); setChatInput(""); }
-                  }}}/>
-                <button style={{...S.btn,padding:"8px 14px"}} onClick={()=>{
-                  if(chatInput.trim()){
-                    const now=Date.now();
-                    if(!window._lastChat||now-window._lastChat>800){ window._lastChat=now; sendToServer("chat_message",{text:chatInput}); setChatInput(""); }
-                  }
-                }}>Send</button>
+
+              {/* Fixed footer — chat input + TTS + action */}
+              <div style={{flexShrink:0}}>
+                <div style={{display:"flex",gap:6,marginBottom:6}}>
+                  <input
+                    style={{...S.input,flex:1,padding:"9px 12px",fontSize:14}}
+                    placeholder="Type a message…"
+                    value={chatInput}
+                    onChange={e=>setChatInput(e.target.value)}
+                    onKeyDown={e=>{
+                      if(e.key==="Enter"&&chatInput.trim()){
+                        const now=Date.now();
+                        if(!window._lastChat||now-window._lastChat>800){
+                          window._lastChat=now;
+                          sendToServer("chat_message",{text:chatInput});
+                          setChatInput("");
+                        }
+                      }
+                    }}
+                  />
+                  <button style={{...S.btn,padding:"9px 14px",flexShrink:0}} onClick={()=>{
+                    if(chatInput.trim()){
+                      const now=Date.now();
+                      if(!window._lastChat||now-window._lastChat>800){
+                        window._lastChat=now;
+                        sendToServer("chat_message",{text:chatInput});
+                        setChatInput("");
+                      }
+                    }
+                  }}>Send</button>
+                  {ttsEnabled && <>
+                    <button style={{...S.btn,background:"#2a2a3a",border:"1px solid #3a3a5a",padding:"9px 10px",flexShrink:0}}
+                      onClick={()=>TTS.readAnswers(onlineAnswers, onlinePlayers.reduce((acc,p)=>{acc[p.id]=p;return acc;},{}))}>🔈</button>
+                    <button style={{...S.btn,background:"#2a2a3a",border:"1px solid #3a3a5a",padding:"9px 10px",flexShrink:0}}
+                      onClick={()=>TTS.stop()}>⏹</button>
+                  </>}
+                </div>
+                {isHost && (
+                  <button style={{...S.bigBtn,background:"#E05C5C"}}
+                    onClick={()=>sendToServer("stop_timer")}>
+                    {onlineSettings.mode===MODES.VOTE?"🗳️ End Discussion & Vote →":"🔍 End Discussion & Accuse →"}
+                  </button>
+                )}
+                {!isHost && <p style={{fontSize:12,color:"#555",textAlign:"center",paddingTop:4}}>Waiting for host to end discussion…</p>}
               </div>
-              <p style={{fontSize:12,color:"#666",textAlign:"center"}}>Talk it out — timer ends automatically</p>
             </div>
           );
 
@@ -2541,6 +2580,17 @@ export default function App() {
             return (
               <div style={S.card}>
                 <h2 style={S.cardTitle}>🔍 Who's the Odd One Out?</h2>
+                {/* Mini chat strip */}
+                {chatMessages.length>0 && (
+                  <div style={{background:"#1a1a28",borderRadius:10,padding:"8px 10px",maxHeight:80,overflowY:"auto",marginBottom:8,border:"1px solid #2a2a3a"}}>
+                    {chatMessages.slice(-3).map((m,i)=>(
+                      <div key={i} style={{fontSize:12,marginBottom:3}}>
+                        <span style={{fontWeight:700,color:m.color}}>{m.playerName}: </span>
+                        <span style={{color:"#bbb"}}>{m.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {iAmQuestioner ? (
                   <>
                     <p style={S.hint}>You're the Questioner — pick your suspect!</p>
@@ -2575,6 +2625,17 @@ export default function App() {
           if (onlinePhase===ONLINE_PHASES.VOTING) return (
             <div style={S.card}>
               <h2 style={S.cardTitle}>🗳️ Cast Your Vote</h2>
+              {/* Mini chat strip */}
+              {chatMessages.length>0 && (
+                <div style={{background:"#1a1a28",borderRadius:10,padding:"8px 10px",maxHeight:80,overflowY:"auto",marginBottom:8,border:"1px solid #2a2a3a"}}>
+                  {chatMessages.slice(-3).map((m,i)=>(
+                    <div key={i} style={{fontSize:12,marginBottom:3}}>
+                      <span style={{fontWeight:700,color:m.color}}>{m.playerName}: </span>
+                      <span style={{color:"#bbb"}}>{m.text}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
               {myVoteCast ? (
                 <div style={S.handoffCard}>
                   <div style={{fontSize:56}}>✅</div>
